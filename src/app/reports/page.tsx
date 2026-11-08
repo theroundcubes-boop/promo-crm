@@ -13,6 +13,7 @@ import {
   Calendar,
   Building,
   CheckCircle2,
+  ExternalLink,
 } from "lucide-react";
 import { mockStore, AppState } from "@/lib/storage/mock-store";
 import {
@@ -81,6 +82,7 @@ export default function ReportsPage() {
       accountName: account?.name || "Unassigned",
       clientName: client?.name || "Client",
       videoTitle: o.video_title,
+      videoUrl: o.video_url || o.video_link || "",
       date: o.date,
       orderedViews: om.orderedViews,
       deliveredViews: om.deliveredViews,
@@ -120,6 +122,7 @@ export default function ReportsPage() {
       "Client",
       "Account",
       "Video Title",
+      "Video URL",
       "Ordered Views",
       "Delivered Views",
       "Over-Delivery Views",
@@ -141,6 +144,7 @@ export default function ReportsPage() {
         `"${r.clientName.replace(/"/g, '""')}"`,
         `"${r.accountName.replace(/"/g, '""')}"`,
         `"${r.videoTitle.replace(/"/g, '""')}"`,
+        `"${(r.videoUrl || "").replace(/"/g, '""')}"`,
         r.orderedViews,
         r.deliveredViews,
         r.overDeliveryViews,
@@ -375,8 +379,21 @@ export default function ReportsPage() {
                   <td className="py-3 px-3 font-semibold text-slate-900 dark:text-white max-w-[130px] truncate">
                     {r.clientName}
                   </td>
-                  <td className="py-3 px-3 max-w-[160px] truncate text-slate-700 dark:text-slate-300">
-                    {r.videoTitle}
+                  <td className="py-3 px-3 max-w-[200px] truncate text-slate-700 dark:text-slate-300">
+                    {r.videoUrl ? (
+                      <a
+                        href={r.videoUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-indigo-600 dark:text-indigo-400 font-semibold hover:underline inline-flex items-center gap-1 truncate max-w-full"
+                        title={r.videoTitle}
+                      >
+                        <span className="truncate">{r.videoTitle}</span>
+                        <ExternalLink className="w-3 h-3 shrink-0" />
+                      </a>
+                    ) : (
+                      <span title={r.videoTitle}>{r.videoTitle}</span>
+                    )}
                   </td>
                   <td className="py-3 px-3 text-right font-mono">
                     {r.orderedViews.toLocaleString()}

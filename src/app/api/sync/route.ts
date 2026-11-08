@@ -8,9 +8,17 @@ interface SyncRecord {
   currency?: string;
   campaign_id: string;
   campaign_name?: string;
+  original_campaign_name?: string;
+  video_id?: string;
+  video_title?: string;
+  video_url?: string;
   status: string;
-  cost: number;
-  views: number;
+  cost?: number;
+  spend_usd?: number;
+  cost_usd?: number;
+  views?: number;
+  delivered_views?: number;
+  impressions?: number;
   timestamp?: string;
 }
 
@@ -160,8 +168,11 @@ export async function POST(req: NextRequest) {
 
     for (const record of records) {
       const campaignId = String(record.campaign_id || "").trim();
-      const views = Math.max(0, Number(record.views) || 0);
-      const costUsd = Math.max(0, Number(record.cost) || 0);
+      const rawViews = record.views ?? record.delivered_views ?? record.impressions;
+      const views = Math.max(0, Number(rawViews) || 0);
+
+      const rawCost = record.cost ?? record.spend_usd ?? (record as any).cost_usd;
+      const costUsd = Math.max(0, Number(rawCost) || 0);
       const rawCustomerId = String(record.customer_id || "").trim();
       const cleanedCid = cleanCustomerId(rawCustomerId);
       const matchedAccountId = accountsMap.get(cleanedCid);
@@ -282,21 +293,59 @@ export async function POST(req: NextRequest) {
           }
         }
 
-        // Upsert into unlinked_campaigns table with normalized customer_id
-        const detectedCode = extractStrictOrderCode(record.campaign_name);
+        // Check if an unlinked record already exists for (user_id, customer_id, campaign_id)
+        const { data: existingUnlinked } = await supabase
+          .from("unlinked_campaigns")
+          .select("id, campaign_name, video_title, is_manual_title")
+          .eq("user_id", userId)
+          .eq("customer_id", cleanedCid)
+          .eq("campaign_id", campaignId)
+          .maybeSingle();
+
+        const isManual = existingUnlinked?.is_manual_title === true;
+        const videoId = (record.video_id || "").trim();
+        const videoUrl = record.video_url || (videoId ? `https://www.youtube.com/watch?v=${videoId}` : null);
+
+        // Preserve manual title if edited by user
+        let finalTitle = (record.video_title || record.campaign_name || `Campaign ${campaignId}`).trim();
+        if (isManual && (existingUnlinked?.video_title || existingUnlinked?.campaign_name)) {
+          finalTitle = existingUnlinked.video_title || existingUnlinked.campaign_name;
+        } else if (videoId && (!record.video_title || finalTitle.toLowerCase().startsWith("video - "))) {
+          try {
+            const oembedRes = await fetch(
+              `https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`,
+              { signal: AbortSignal.timeout(4000) }
+            );
+            if (oembedRes.ok) {
+              const oData = await oembedRes.json();
+              if (oData && oData.title) {
+                finalTitle = oData.title;
+              }
+            }
+          } catch (oeErr) {
+            // Safe fallback to existing title
+          }
+        }
+
+        // Upsert into unlinked_campaigns table with normalized customer_id (Requirement 3)
+        const detectedCode = extractStrictOrderCode(record.campaign_name) || extractStrictOrderCode(finalTitle);
         await supabase.from("unlinked_campaigns").upsert(
           {
             user_id: userId,
             customer_id: cleanedCid,
             account_name: record.account_name || `Sub-Account (${cleanedCid})`,
             campaign_id: campaignId,
-            campaign_name: record.campaign_name || `Campaign ${campaignId}`,
+            campaign_name: finalTitle,
+            video_id: videoId || null,
+            video_title: finalTitle,
+            video_url: videoUrl,
             cost_usd: isNonUsd ? 0 : costUsd,
             views: views,
             status: record.status || "UNKNOWN",
             date_range: (record as any).date_range || "ALL_TIME",
             detected_order_code: detectedCode,
-            created_at: new Date().toISOString(),
+            is_manual_title: isManual,
+            updated_at: new Date().toISOString(),
           },
           { onConflict: "user_id,customer_id,campaign_id" }
         );
@@ -306,6 +355,9 @@ export async function POST(req: NextRequest) {
       }
 
       // 6. Process Matched Orders
+      const videoId = (record.video_id || "").trim();
+      const videoUrl = record.video_url || (videoId ? `https://www.youtube.com/watch?v=${videoId}` : null);
+
       for (const order of matchedOrders) {
         const size = Math.max(1, order.order_size_views);
         const progress = (views / size) * 100;
@@ -399,6 +451,25 @@ export async function POST(req: NextRequest) {
 
         if (matchedAccountId && order.account_id !== matchedAccountId) {
           updateData.account_id = matchedAccountId;
+        }
+
+        // Requirement 3: If an order has empty video_id/title/url, backfill them from record
+        if (!order.video_id && videoId) {
+          updateData.video_id = videoId;
+        }
+        if (!order.video_url && videoUrl) {
+          updateData.video_url = videoUrl;
+        }
+        if ((!order.video_link || order.video_link.includes("promo_video")) && videoUrl) {
+          updateData.video_link = videoUrl;
+        }
+        if (
+          (!order.video_title ||
+            order.video_title.startsWith("Campaign ") ||
+            order.video_title.toLowerCase().startsWith("video - ")) &&
+          (record.video_title || record.campaign_name)
+        ) {
+          updateData.video_title = record.video_title || record.campaign_name;
         }
 
         await supabase

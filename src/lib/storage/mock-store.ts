@@ -809,6 +809,23 @@ class MockStore {
     }
   }
 
+  async updateUnlinkedCampaign(id: string, updates: Partial<UnlinkedCampaign>) {
+    const list = this.state.unlinkedCampaigns || [];
+    const idx = list.findIndex((c) => c.id === id);
+    if (idx !== -1) {
+      list[idx] = { ...list[idx], ...updates };
+      this.state.unlinkedCampaigns = [...list];
+      this.saveState();
+    }
+
+    if (this.state.isSupabaseConnected && this.supabaseClient) {
+      await this.supabaseClient
+        .from("unlinked_campaigns")
+        .update(updates)
+        .eq("id", id);
+    }
+  }
+
   async convertUnlinkedToOrder(
     unlinkedId: string,
     orderData: {
@@ -817,6 +834,7 @@ class MockStore {
       video_link?: string;
       order_size_views: number;
       client_rate_paise_per_view: number;
+      delivered_views?: number;
     }
   ) {
     const campaign = (this.state.unlinkedCampaigns || []).find(
@@ -845,15 +863,20 @@ class MockStore {
     }
 
     const orderSize = Math.max(1, orderData.order_size_views || 100000);
-    const delivered = campaign.views || 0;
+    const delivered = orderData.delivered_views ?? campaign.views ?? 0;
+    const vId = campaign.video_id || null;
+    const vUrl = campaign.video_url || (vId ? `https://www.youtube.com/watch?v=${vId}` : null);
+    const vLink = orderData.video_link || vUrl || "https://www.youtube.com/watch?v=promo_video";
+    const vTitle = orderData.video_title || campaign.video_title || campaign.campaign_name;
 
     await this.addOrder({
       account_id: targetAccount.id,
       client_id: orderData.client_id,
       date: new Date().toISOString().split("T")[0],
-      video_link:
-        orderData.video_link || "https://www.youtube.com/watch?v=promo_video",
-      video_title: orderData.video_title || campaign.campaign_name,
+      video_link: vLink,
+      video_title: vTitle,
+      video_id: vId,
+      video_url: vUrl,
       order_size_views: orderSize,
       client_rate_paise_per_view: orderData.client_rate_paise_per_view,
       delivered_views: delivered,
@@ -868,26 +891,21 @@ class MockStore {
   async bulkConvertUnlinked(
     unlinkedIds: string[],
     client_id: string,
-    ratePaise: number
+    ratePaise: number,
+    orderSize?: number
   ) {
     for (const id of unlinkedIds) {
       const camp = (this.state.unlinkedCampaigns || []).find((c) => c.id === id);
-      if (!camp) continue;
-
-      // Smart guess order size: check 50k, 100k, 1m or default 100k
-      let guessSize = 100000;
-      const lower = camp.campaign_name.toLowerCase();
-      if (lower.includes("50k")) guessSize = 50000;
-      else if (lower.includes("200k")) guessSize = 200000;
-      else if (lower.includes("500k")) guessSize = 500000;
-      else if (lower.includes("1m")) guessSize = 1000000;
-
-      await this.convertUnlinkedToOrder(id, {
-        client_id,
-        order_size_views: guessSize,
-        client_rate_paise_per_view: ratePaise,
-        video_title: camp.campaign_name,
-      });
+      if (camp) {
+        const size = orderSize || (camp.views > 0 ? Math.ceil(camp.views / 50000) * 50000 : 100000);
+        await this.convertUnlinkedToOrder(id, {
+          client_id,
+          order_size_views: size,
+          client_rate_paise_per_view: ratePaise,
+          video_title: camp.video_title || camp.campaign_name,
+          video_link: camp.video_url || (camp.video_id ? `https://www.youtube.com/watch?v=${camp.video_id}` : undefined),
+        });
+      }
     }
   }
 }

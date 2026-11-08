@@ -149,8 +149,21 @@ export default function NotificationsPage() {
                 {notif.message}
               </p>
 
-              {notif.metadata?.order_id && (
-                <div className="mt-2">
+              <div className="flex items-center gap-3 mt-2 flex-wrap">
+                {notif.metadata?.video_url && (
+                  <a
+                    href={notif.metadata.video_url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center gap-1 text-[11px] font-bold text-red-600 dark:text-red-400 hover:underline"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <ExternalLink className="w-3 h-3" />
+                    Open Video
+                  </a>
+                )}
+
+                {notif.metadata?.order_id && (
                   <Link
                     href="/orders"
                     className="inline-flex items-center gap-1 text-[11px] font-bold text-brand-600 dark:text-brand-400 hover:underline"
@@ -158,8 +171,8 @@ export default function NotificationsPage() {
                     <Video className="w-3 h-3" />
                     View Order
                   </Link>
-                </div>
-              )}
+                )}
+              </div>
             </div>
 
             {!notif.read && (

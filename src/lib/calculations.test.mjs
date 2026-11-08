@@ -414,3 +414,117 @@ test("Email Webhook sender domain validation (Google domains only)", () => {
   assert.equal(isAuthorizedGoogleSender(""), false);
   assert.equal(isAuthorizedGoogleSender(null), false);
 });
+
+test("Sync Record Video Field Mapping & Video URL resolution", () => {
+  function mapSyncRecordToVideoFields(record) {
+    const videoId = (record.video_id || "").trim() || null;
+    const videoUrl = record.video_url || (videoId ? `https://www.youtube.com/watch?v=${videoId}` : null);
+    const videoTitle = (record.video_title || record.campaign_name || "").trim() || null;
+    return {
+      videoId,
+      videoUrl,
+      videoTitle,
+    };
+  }
+
+  // 1. Record with full video metadata
+  const fullRecord = {
+    campaign_id: "12345",
+    campaign_name: "Video - Efficient reach - 2026-10-19",
+    video_id: "dQw4w9WgXcQ",
+    video_title: "Never Gonna Give You Up",
+    video_url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+  };
+  const mappedFull = mapSyncRecordToVideoFields(fullRecord);
+  assert.equal(mappedFull.videoId, "dQw4w9WgXcQ");
+  assert.equal(mappedFull.videoTitle, "Never Gonna Give You Up");
+  assert.equal(mappedFull.videoUrl, "https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+
+  // 2. Record with only video_id (auto-resolves video_url)
+  const idOnlyRecord = {
+    campaign_id: "67890",
+    campaign_name: "Generic Reach 2026",
+    video_id: "JGwWNGJdvx8",
+  };
+  const mappedIdOnly = mapSyncRecordToVideoFields(idOnlyRecord);
+  assert.equal(mappedIdOnly.videoId, "JGwWNGJdvx8");
+  assert.equal(mappedIdOnly.videoUrl, "https://www.youtube.com/watch?v=JGwWNGJdvx8");
+  assert.equal(mappedIdOnly.videoTitle, "Generic Reach 2026");
+
+  // 3. Record with NO video detected
+  const noVideoRecord = {
+    campaign_id: "99999",
+    campaign_name: "Old Campaign Without Video",
+  };
+  const mappedNoVideo = mapSyncRecordToVideoFields(noVideoRecord);
+  assert.equal(mappedNoVideo.videoId, null);
+  assert.equal(mappedNoVideo.videoUrl, null);
+  assert.equal(mappedNoVideo.videoTitle, "Old Campaign Without Video");
+});
+
+test("Unlinked Campaign Upsert & Manual Title Preservation", () => {
+  function resolveUnlinkedCampaignUpsert(existingCampaign, incomingRecord) {
+    const isManual = existingCampaign?.is_manual_title === true;
+    let finalTitle = incomingRecord.video_title || incomingRecord.campaign_name || "Campaign";
+
+    // If manual title exists, preserve it!
+    if (isManual && existingCampaign?.video_title) {
+      finalTitle = existingCampaign.video_title;
+    }
+
+    const videoId = incomingRecord.video_id || existingCampaign?.video_id || null;
+    const videoUrl = incomingRecord.video_url || (videoId ? `https://www.youtube.com/watch?v=${videoId}` : null);
+
+    return {
+      customer_id: incomingRecord.customer_id,
+      campaign_id: incomingRecord.campaign_id,
+      campaign_name: finalTitle,
+      video_title: finalTitle,
+      video_id: videoId,
+      video_url: videoUrl,
+      views: incomingRecord.views,
+      cost_usd: incomingRecord.cost,
+      status: incomingRecord.status,
+      is_manual_title: isManual,
+    };
+  }
+
+  // Case 1: Fresh record upsert
+  const fresh = resolveUnlinkedCampaignUpsert(null, {
+    customer_id: "1234567890",
+    campaign_id: "cmp_1",
+    campaign_name: "Original Ad Campaign",
+    video_id: "vid_123",
+    video_title: "Artist Song 1",
+    cost: 15.5,
+    views: 45000,
+    status: "ENABLED",
+  });
+  assert.equal(fresh.video_title, "Artist Song 1");
+  assert.equal(fresh.views, 45000);
+  assert.equal(fresh.is_manual_title, false);
+
+  // Case 2: Subsequent sync update WITH manual user edit
+  const existingWithManualTitle = {
+    id: "unlinked_1",
+    video_title: "My Custom Verified Song Name",
+    is_manual_title: true,
+    video_id: "vid_123",
+  };
+  const updatedWithManual = resolveUnlinkedCampaignUpsert(existingWithManualTitle, {
+    customer_id: "1234567890",
+    campaign_id: "cmp_1",
+    campaign_name: "Original Raw Name",
+    video_id: "vid_123",
+    video_title: "Artist Song 1 Raw",
+    cost: 25.0,
+    views: 80000,
+    status: "ENABLED",
+  });
+  // Must preserve custom title!
+  assert.equal(updatedWithManual.video_title, "My Custom Verified Song Name");
+  // Must update latest views and cost!
+  assert.equal(updatedWithManual.views, 80000);
+  assert.equal(updatedWithManual.cost_usd, 25.0);
+  assert.equal(updatedWithManual.is_manual_title, true);
+});

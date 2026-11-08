@@ -25,6 +25,7 @@ import {
   Save,
   CheckSquare,
   ArrowRight,
+  ExternalLink,
 } from "lucide-react";
 import { mockStore, AppState } from "@/lib/storage/mock-store";
 import {
@@ -601,6 +602,17 @@ export default function DashboardPage() {
                       <span className="font-bold text-xs text-slate-900 dark:text-white truncate">
                         {order.video_title}
                       </span>
+                      {(order.video_url || order.video_link) && (
+                        <a
+                          href={order.video_url || order.video_link}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-slate-400 hover:text-red-500 transition"
+                          title="Open YouTube video"
+                        >
+                          <ExternalLink className="w-3 h-3" />
+                        </a>
+                      )}
                       <span className="px-2 py-0.5 rounded text-[10px] font-black bg-red-600 text-white uppercase tracking-wider animate-pulse">
                         Pause Now! ({om.progressPercent}%)
                       </span>

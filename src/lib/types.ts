@@ -72,6 +72,8 @@ export interface Order {
   client_id: string;
   video_link: string;
   video_title: string;
+  video_id?: string | null;
+  video_url?: string | null;
   order_size_views: number;
   client_rate_paise_per_view: number;
   delivered_views: number;
@@ -148,12 +150,17 @@ export interface UnlinkedCampaign {
   account_name: string;
   campaign_id: string;
   campaign_name: string;
+  video_id?: string | null;
+  video_title?: string | null;
+  video_url?: string | null;
+  is_manual_title?: boolean;
   cost_usd: number;
   views: number;
   status: string;
   date_range?: string;
   detected_order_code?: string | null;
   created_at: string;
+  updated_at?: string;
 }
 
 // Derived Metrics
