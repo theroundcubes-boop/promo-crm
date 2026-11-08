@@ -735,9 +735,10 @@ export default function ImportInboxPage() {
                           <span className="text-slate-400">No link</span>
                         )}
                         <span>•</span>
-                        <span className="font-semibold text-slate-800 dark:text-slate-200 flex items-center gap-1">
-                          <Eye className="w-3.5 h-3.5 text-blue-500" />
-                          {camp.views.toLocaleString()} views
+                        <span className="font-semibold text-slate-800 dark:text-slate-200 flex items-center gap-1" title="Real YouTube Public Views (Live YouTube viewCount, not Google Ads TrueView)">
+                          <Eye className="w-3.5 h-3.5 text-red-500" />
+                          <span className="font-bold text-red-600 dark:text-red-400">{camp.views.toLocaleString()}</span>
+                          <span>public views</span>
                         </span>
                         <span>•</span>
                         <span className="font-semibold text-emerald-600 dark:text-emerald-400 flex items-center gap-1">

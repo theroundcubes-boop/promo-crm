@@ -192,10 +192,15 @@ export default function SettingsPage() {
 
   const googleAdsScriptCode = `/**
  * ============================================================================
- * PROMO CRM - GOOGLE ADS MCC SYNC SCRIPT (v4.0)
+ * PROMO CRM - GOOGLE ADS VIDEO ASSET SYNC SCRIPT (v6.0)
  * ============================================================================
- * Paste into Google Ads MCC -> Tools & Settings -> Scripts -> New Script
- * Schedule: Hourly (or click "Run" / "Preview" once to test immediately)
+ * Syncs at the Video Asset level (Assets -> Videos).
+ * Discovers EVERY YouTube video run in your account, fetches their
+ * exact performance and public views, and sends them to Promo CRM Import Inbox.
+ *
+ * Works in:
+ * 1) MCC Manager Account (loops through sub-accounts)
+ * 2) Directly in Sub-Account (runs for current account)
  * ============================================================================
  */
 var CONFIG = {
@@ -203,13 +208,41 @@ var CONFIG = {
   SECRET_KEY: "${activeScriptKey}",
   DRY_RUN: true,
   IMPORT_HISTORY: false,
-  COUNT_IMPRESSIONS_AS_VIEWS: false,
   MAX_ACCOUNTS_PER_RUN: 50,
-  TARGET_ACCOUNT_IDS: [], // Example: ["179-995-0274"]
+  TARGET_ACCOUNT_IDS: [], // e.g. ["135-858-3337"] or leave [] for all
   DEBUG: true
 };
 
 var OEMBED_CACHE = {};
+
+function getYouTubeDetails(videoId) {
+  var result = { title: null, views: 0 };
+  if (!videoId) return result;
+  try {
+    var url = "https://www.youtube.com/watch?v=" + videoId;
+    var res = UrlFetchApp.fetch(url, {
+      muteHttpExceptions: true,
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9"
+      }
+    });
+    if (res.getResponseCode() === 200) {
+      var html = res.getContentText();
+      var vMatch = html.match(/"viewCount":"(\d+)"/);
+      var tMatch = html.match(/<title>(.*?)<\/title>/);
+      if (vMatch && vMatch[1]) {
+        result.views = parseInt(vMatch[1], 10);
+      }
+      if (tMatch && tMatch[1]) {
+        result.title = tMatch[1].replace(" - YouTube", "").trim();
+      }
+    }
+  } catch (errYt) {
+    Logger.log("[WARN fetch YouTube " + videoId + "] " + errYt);
+  }
+  return result;
+}
 
 function getOembedTitle(videoId) {
   if (!videoId) return null;
@@ -225,15 +258,137 @@ function getOembedTitle(videoId) {
       }
     }
   } catch (errOembed) {
-    Logger.log("[ERROR oEmbed fallback for " + videoId + "] " + errOembed);
+    Logger.log("[WARN oEmbed] " + errOembed);
   }
   return null;
+}
+
+function processAccount(accountsPayload) {
+  var currentAcc = AdsApp.currentAccount();
+  var customerId = currentAcc.getCustomerId().replace(/[^0-9]/g, "");
+  var accountName = currentAcc.getName() || ("Sub-Account " + customerId);
+  var currencyCode = currentAcc.getCurrencyCode() || "USD";
+
+  Logger.log("-------------------------------------------------");
+  Logger.log("[ACCOUNT] " + accountName + " (ID: " + customerId + ", Currency: " + currencyCode + ")");
+
+  // 1. Map Video Ads to collect spend, views, and campaign info per video ID
+  var videoStatsMap = {};
+  try {
+    if (typeof AdsApp.videoAds === "function") {
+      var vAdIter = AdsApp.videoAds().get();
+      while (vAdIter.hasNext()) {
+        var vAd = vAdIter.next();
+        var vId = vAd.getVideoId();
+        if (!vId) continue;
+
+        var stats = vAd.getStatsFor("ALL_TIME");
+        var cost = stats ? (stats.getCost() || 0) : 0;
+        var views = stats ? (stats.getViews() || 0) : 0;
+        var imps = stats ? (stats.getImpressions() || 0) : 0;
+        var isEnabled = vAd.isEnabled();
+
+        var campId = "";
+        var campName = "";
+        try {
+          var camp = vAd.getAdGroup().getCampaign();
+          campId = camp.getId().toString();
+          campName = camp.getName();
+        } catch (eCamp) {}
+
+        if (!videoStatsMap[vId]) {
+          videoStatsMap[vId] = {
+            cost: cost,
+            views: views,
+            impressions: imps,
+            status: isEnabled ? "ENABLED" : "PAUSED",
+            campaignId: campId,
+            campaignName: campName
+          };
+        } else {
+          videoStatsMap[vId].cost += cost;
+          videoStatsMap[vId].views += views;
+          videoStatsMap[vId].impressions += imps;
+          if (isEnabled) videoStatsMap[vId].status = "ENABLED";
+          if (!videoStatsMap[vId].campaignId && campId) {
+            videoStatsMap[vId].campaignId = campId;
+            videoStatsMap[vId].campaignName = campName;
+          }
+        }
+      }
+    }
+  } catch (errAdMap) {
+    Logger.log("[WARN videoAds scan] " + errAdMap);
+  }
+
+  // 2. Query all YouTube Video Assets in the account (Assets -> Videos)
+  var assetMap = {};
+  try {
+    var assetQuery = "SELECT asset.id, asset.resource_name, asset.name, asset.youtube_video_asset.youtube_video_id, asset.youtube_video_asset.youtube_video_title FROM asset WHERE asset.type = 'YOUTUBE_VIDEO'";
+    var assetReport = AdsApp.search(assetQuery);
+    while (assetReport.hasNext()) {
+      var aRow = assetReport.next();
+      if (aRow.asset && aRow.asset.youtubeVideoAsset && aRow.asset.youtubeVideoAsset.youtubeVideoId) {
+        var yId = aRow.asset.youtubeVideoAsset.youtubeVideoId;
+        var yTitle = aRow.asset.youtubeVideoAsset.youtubeVideoTitle || aRow.asset.name || null;
+        assetMap[yId] = {
+          title: yTitle,
+          resourceName: aRow.asset.resourceName
+        };
+      }
+    }
+  } catch (errAsset) {
+    Logger.log("[WARN asset query] " + errAsset);
+  }
+
+  // 3. Combine all distinct YouTube Video IDs
+  var allVideoIds = {};
+  for (var aId in assetMap) allVideoIds[aId] = true;
+  for (var sId in videoStatsMap) allVideoIds[sId] = true;
+
+  var videoList = Object.keys(allVideoIds);
+  Logger.log("   [DISCOVERED VIDEO ASSETS] " + videoList.length + " video(s) found in account " + customerId);
+
+  for (var i = 0; i < videoList.length; i++) {
+    var vId = videoList[i];
+    var assetInfo = assetMap[vId] || {};
+    var statsInfo = videoStatsMap[vId] || {};
+
+    // Fetch live YouTube public views and exact title directly from YouTube
+    var ytInfo = getYouTubeDetails(vId);
+    var title = ytInfo.title || assetInfo.title || getOembedTitle(vId);
+    var publicViews = ytInfo.views > 0 ? ytInfo.views : (statsInfo.views || 0);
+
+    var parentCampId = statsInfo.campaignId || "";
+    var compositeId = parentCampId ? (parentCampId + "_" + vId) : ("vid_" + vId);
+    var costUsd = Math.round((statsInfo.cost || 0) * 100) / 100;
+    var impressions = statsInfo.impressions || 0;
+    var status = statsInfo.status || "ENABLED";
+    var videoUrl = "https://www.youtube.com/watch?v=" + vId;
+
+    accountsPayload.push({
+      customer_id: customerId,
+      account_name: accountName,
+      currency: currencyCode,
+      campaign_id: compositeId,
+      campaign_name: title || statsInfo.campaignName || ("Video " + vId),
+      video_id: vId,
+      video_title: title || ("YouTube Video " + vId),
+      video_url: videoUrl,
+      status: status,
+      cost: costUsd,
+      views: publicViews, // REAL YouTube Public Views!
+      impressions: impressions
+    });
+
+    Logger.log("   [" + (i + 1) + "/" + videoList.length + "] Video: " + vId + " | Title: " + (title || "[Server will scrape]") + " | Public Views: " + publicViews.toLocaleString() + " | Cost: $" + costUsd + " | Status: " + status);
+  }
 }
 
 function main() {
   var startTime = new Date().getTime();
   Logger.log("=================================================");
-  Logger.log("[PROMO CRM] Starting MCC Video Sync (v4.0)");
+  Logger.log("[PROMO CRM] Starting Video Asset Sync (v6.0)");
   Logger.log("[PROMO CRM] Endpoint: " + CONFIG.SYNC_ENDPOINT_URL);
   Logger.log("[PROMO CRM] Dry Run: " + CONFIG.DRY_RUN + " | Debug: " + CONFIG.DEBUG);
   Logger.log("=================================================");
@@ -243,238 +398,48 @@ function main() {
   }
 
   var accountsPayload = [];
-  var accountSelector = AdsManagerApp.accounts();
+  var isManager = (typeof AdsManagerApp !== "undefined" && typeof AdsManagerApp.accounts === "function");
 
-  if (CONFIG.TARGET_ACCOUNT_IDS && CONFIG.TARGET_ACCOUNT_IDS.length > 0) {
-    var cleanedTargetIds = [];
-    for (var i = 0; i < CONFIG.TARGET_ACCOUNT_IDS.length; i++) {
-      var rawId = String(CONFIG.TARGET_ACCOUNT_IDS[i]).replace(/[^0-9]/g, "").trim();
-      if (rawId) cleanedTargetIds.push(rawId);
-    }
-    if (cleanedTargetIds.length > 0) {
-      accountSelector = accountSelector.withIds(cleanedTargetIds);
-    }
-  }
-
-  var accountIterator = accountSelector.withLimit(CONFIG.MAX_ACCOUNTS_PER_RUN).get();
-  var accountsProcessed = 0;
-
-  while (accountIterator.hasNext()) {
-    if (new Date().getTime() - startTime > 25 * 60 * 1000) {
-      Logger.log("[PROMO CRM] Approaching script timeout (25 mins). Sending accumulated batch...");
-      break;
-    }
-
-    var account = accountIterator.next();
-    AdsManagerApp.select(account);
-    var customerId = account.getCustomerId().replace(/[^0-9]/g, "");
-    var accountName = account.getName() || ("Sub-Account " + customerId);
-    var currencyCode = account.getCurrencyCode() || "USD";
-    accountsProcessed++;
-
-    Logger.log("-------------------------------------------------");
-    Logger.log("[SUB-ACCOUNT " + accountsProcessed + "] " + accountName + " (ID: " + customerId + ", Currency: " + currencyCode + ")");
-
-    var assetMap = {};
-    var assetCount = 0;
-    try {
-      var assetQuery = "SELECT asset.resource_name, asset.name, asset.youtube_video_asset.youtube_video_id, asset.youtube_video_asset.youtube_video_title FROM asset WHERE asset.type = 'YOUTUBE_VIDEO'";
-      var assetReport = AdsApp.search(assetQuery);
-      while (assetReport.hasNext()) {
-        var aRow = assetReport.next();
-        if (aRow.asset && aRow.asset.resourceName) {
-          var yAsset = aRow.asset.youtubeVideoAsset;
-          var yId = yAsset ? yAsset.youtubeVideoId : null;
-          var yTitle = yAsset ? yAsset.youtubeVideoTitle : (aRow.asset.name || null);
-          if (yId) {
-            assetMap[aRow.asset.resourceName] = { id: yId, title: yTitle };
-            assetCount++;
-          }
-        }
+  if (isManager) {
+    var accountSelector = AdsManagerApp.accounts();
+    if (CONFIG.TARGET_ACCOUNT_IDS && CONFIG.TARGET_ACCOUNT_IDS.length > 0) {
+      var cleanedTargetIds = [];
+      for (var i = 0; i < CONFIG.TARGET_ACCOUNT_IDS.length; i++) {
+        var rawId = String(CONFIG.TARGET_ACCOUNT_IDS[i]).replace(/[^0-9]/g, "").trim();
+        if (rawId) cleanedTargetIds.push(rawId);
       }
-    } catch (errAsset) {
-      Logger.log("[ERROR asset query] " + errAsset);
-    }
-
-    if (CONFIG.DEBUG) {
-      Logger.log("   [DEBUG] YouTube assets found: " + assetCount);
-    }
-
-    var campaignVideoMap = {};
-
-    try {
-      var vAdQuery = "SELECT campaign.id, ad_group_ad.ad.video_ad.video.asset FROM ad_group_ad WHERE campaign.advertising_channel_type = 'VIDEO'";
-      var vAdReport = AdsApp.search(vAdQuery);
-      while (vAdReport.hasNext()) {
-        var vRow = vAdReport.next();
-        var cId = vRow.campaign ? vRow.campaign.id.toString() : null;
-        var videoAssetRes = (vRow.adGroupAd && vRow.adGroupAd.ad && vRow.adGroupAd.ad.videoAd && vRow.adGroupAd.ad.videoAd.video)
-          ? vRow.adGroupAd.ad.videoAd.video.asset
-          : null;
-        if (cId && videoAssetRes && assetMap[videoAssetRes] && !campaignVideoMap[cId]) {
-          campaignVideoMap[cId] = {
-            videoId: assetMap[videoAssetRes].id,
-            videoTitle: assetMap[videoAssetRes].title
-          };
-          if (CONFIG.DEBUG) {
-            Logger.log("   [DEBUG video_ad] Campaign " + cId + " matched to video ID: " + assetMap[videoAssetRes].id);
-          }
-        }
-      }
-    } catch (errVAd) {
-      Logger.log("[ERROR video_ad query] " + errVAd);
-    }
-
-    try {
-      var respAdQuery = "SELECT campaign.id, ad_group_ad.ad.video_responsive_ad.videos FROM ad_group_ad WHERE campaign.advertising_channel_type = 'VIDEO'";
-      var respReport = AdsApp.search(respAdQuery);
-      while (respReport.hasNext()) {
-        var rRow = respReport.next();
-        var cId = rRow.campaign ? rRow.campaign.id.toString() : null;
-        var videosList = (rRow.adGroupAd && rRow.adGroupAd.ad && rRow.adGroupAd.ad.videoResponsiveAd)
-          ? rRow.adGroupAd.ad.videoResponsiveAd.videos
-          : null;
-        if (cId && Array.isArray(videosList) && !campaignVideoMap[cId]) {
-          for (var vi = 0; vi < videosList.length; vi++) {
-            var vItem = videosList[vi];
-            var vAssetRes = vItem ? vItem.asset : null;
-            if (vAssetRes && assetMap[vAssetRes]) {
-              campaignVideoMap[cId] = {
-                videoId: assetMap[vAssetRes].id,
-                videoTitle: assetMap[vAssetRes].title
-              };
-              if (CONFIG.DEBUG) {
-                Logger.log("   [DEBUG video_responsive_ad] Campaign " + cId + " matched to video ID: " + assetMap[vAssetRes].id);
-              }
-              break;
-            }
-          }
-        }
-      }
-    } catch (errRespAd) {
-      Logger.log("[ERROR video_responsive_ad query] " + errRespAd);
-    }
-
-    var matchedCampaignsCount = 0;
-    var undetectedCampaignsCount = 0;
-    var gaqlSuccess = false;
-
-    try {
-      var campQuery = "SELECT campaign.id, campaign.name, campaign.status, metrics.cost_micros, metrics.video_views, metrics.impressions " +
-                      "FROM campaign WHERE campaign.advertising_channel_type = 'VIDEO' AND campaign.status IN ('ENABLED', 'PAUSED')";
-      var campReport = AdsApp.search(campQuery);
-      gaqlSuccess = true;
-
-      while (campReport.hasNext()) {
-        var row = campReport.next();
-        var campId = row.campaign.id.toString();
-        var campName = row.campaign.name;
-        var campStatus = row.campaign.status;
-
-        var costMicros = (row.metrics && row.metrics.costMicros) ? row.metrics.costMicros : 0;
-        var costUsd = Math.round((costMicros / 1e6) * 100) / 100;
-        var trueViews = (row.metrics && row.metrics.videoViews) ? row.metrics.videoViews : 0;
-        var impressions = (row.metrics && row.metrics.impressions) ? row.metrics.impressions : 0;
-
-        var deliveredViews = CONFIG.COUNT_IMPRESSIONS_AS_VIEWS ? impressions : trueViews;
-
-        var vInfo = campaignVideoMap[campId];
-        var videoId = vInfo ? vInfo.videoId : null;
-        var videoTitle = vInfo ? vInfo.videoTitle : null;
-
-        if (videoId && !videoTitle) {
-          videoTitle = getOembedTitle(videoId);
-        }
-
-        var videoUrl = videoId ? ("https://www.youtube.com/watch?v=" + videoId) : null;
-
-        if (videoId) matchedCampaignsCount++;
-        else undetectedCampaignsCount++;
-
-        accountsPayload.push({
-          customer_id: customerId,
-          account_name: accountName,
-          currency: currencyCode,
-          campaign_id: campId,
-          campaign_name: campName,
-          video_id: videoId || null,
-          video_title: videoTitle || null,
-          video_url: videoUrl,
-          status: campStatus,
-          cost: costUsd,
-          views: deliveredViews,
-          impressions: impressions
-        });
-
-        var displayTitle = videoTitle ? ("\\\"" + videoTitle + "\\\"") : "[Video not detected]";
-        Logger.log("   -> [" + campStatus + "] " + displayTitle + (videoId ? (" (ID: " + videoId + ")") : "") + " | Views: " + deliveredViews.toLocaleString() + " | Cost: $" + costUsd);
-      }
-    } catch (errGaqlCamp) {
-      Logger.log("[ERROR campaign metrics GAQL] " + errGaqlCamp);
-    }
-
-    if (!gaqlSuccess) {
-      try {
-        Logger.log("[PROMO CRM] GAQL metrics failed. Falling back to AdsApp.videoCampaigns()...");
-        if (typeof AdsApp.videoCampaigns === "function") {
-          var fbIter = AdsApp.videoCampaigns().withCondition("Status IN [ENABLED, PAUSED]").get();
-          while (fbIter.hasNext()) {
-            var fbCamp = fbIter.next();
-            var fbId = fbCamp.getId().toString();
-            var fbName = fbCamp.getName();
-            var fbStatus = fbCamp.isEnabled() ? "ENABLED" : "PAUSED";
-            var fbStats = fbCamp.getStatsFor("ALL_TIME");
-            var fbCost = Math.round((fbStats.getCost() || 0) * 100) / 100;
-            var fbViews = CONFIG.COUNT_IMPRESSIONS_AS_VIEWS ? (fbStats.getImpressions() || 0) : (fbStats.getViews() || 0);
-            var fbImpressions = fbStats.getImpressions() || 0;
-
-            var fbVInfo = campaignVideoMap[fbId];
-            var fbVideoId = fbVInfo ? fbVInfo.videoId : null;
-            var fbVideoTitle = fbVInfo ? fbVInfo.videoTitle : null;
-            if (fbVideoId && !fbVideoTitle) fbVideoTitle = getOembedTitle(fbVideoId);
-            var fbVideoUrl = fbVideoId ? ("https://www.youtube.com/watch?v=" + fbVideoId) : null;
-
-            if (fbVideoId) matchedCampaignsCount++;
-            else undetectedCampaignsCount++;
-
-            accountsPayload.push({
-              customer_id: customerId,
-              account_name: accountName,
-              currency: currencyCode,
-              campaign_id: fbId,
-              campaign_name: fbName,
-              video_id: fbVideoId || null,
-              video_title: fbVideoTitle || null,
-              video_url: fbVideoUrl,
-              status: fbStatus,
-              cost: fbCost,
-              views: fbViews,
-              impressions: fbImpressions
-            });
-
-            Logger.log("   [FALLBACK] -> [" + fbStatus + "] " + (fbVideoTitle || fbName) + " | Views: " + fbViews + " | Cost: $" + fbCost);
-          }
-        }
-      } catch (errFallback) {
-        Logger.log("[ERROR videoCampaigns fallback] " + errFallback);
+      if (cleanedTargetIds.length > 0) {
+        accountSelector = accountSelector.withIds(cleanedTargetIds);
       }
     }
 
-    if (CONFIG.DEBUG) {
-      Logger.log("   [DEBUG summary] Campaigns matched to a video: " + matchedCampaignsCount + " | Campaigns with no video detected: " + undetectedCampaignsCount);
+    var accountIterator = accountSelector.withLimit(CONFIG.MAX_ACCOUNTS_PER_RUN).get();
+    var accountsProcessed = 0;
+
+    while (accountIterator.hasNext()) {
+      if (new Date().getTime() - startTime > 25 * 60 * 1000) {
+        Logger.log("[PROMO CRM] Approaching script timeout (25 mins). Sending accumulated batch...");
+        break;
+      }
+      var account = accountIterator.next();
+      AdsManagerApp.select(account);
+      accountsProcessed++;
+      processAccount(accountsPayload);
     }
+  } else {
+    // Single Account Mode (e.g. pasted directly in Sub-Account 135-858-3337)
+    processAccount(accountsPayload);
   }
 
   Logger.log("=================================================");
-  Logger.log("[PROMO CRM] Total Campaign Records Gathered: " + accountsPayload.length);
-  Logger.log("[PROMO CRM] Sending payload in batches of 50 to: " + CONFIG.SYNC_ENDPOINT_URL);
+  Logger.log("[PROMO CRM] Total Video Asset Records Gathered: " + accountsPayload.length);
 
   if (accountsPayload.length === 0) {
-    Logger.log("[PROMO CRM] Zero video campaigns found. Script finished.");
+    Logger.log("[PROMO CRM] Zero video assets found. Script finished.");
     return;
   }
 
-  var batchSize = CONFIG.BATCH_SIZE || 50;
+  var batchSize = 50;
   var totalBatches = Math.ceil(accountsPayload.length / batchSize);
 
   for (var b = 0; b < totalBatches; b++) {
@@ -501,46 +466,39 @@ function main() {
       Logger.log("   updated_count: " + (result.updated_count || 0));
       Logger.log("   unlinked_count: " + (result.unlinked_count || 0));
 
-      if (result.currency_warnings && result.currency_warnings.length > 0) {
-        for (var cw = 0; cw < result.currency_warnings.length; cw++) {
-          Logger.log("   [WARNING currency] " + result.currency_warnings[cw]);
-        }
-      }
-
       var pauseList = result.campaigns_to_pause || [];
-      if (pauseList.length > 0) {
-        if (CONFIG.IMPORT_HISTORY) {
-          Logger.log("   [IMPORT_HISTORY] Auto-pause skipped for " + pauseList.length + " campaigns.");
-        } else if (CONFIG.DRY_RUN) {
-          for (var p = 0; p < pauseList.length; p++) {
-            var itemDry = pauseList[p];
-            Logger.log("   [DRY-RUN] would pause Campaign " + itemDry.campaign_id + " in account " + itemDry.customer_id + " (" + itemDry.reason + ")");
-          }
-        } else {
-          for (var pReal = 0; pReal < pauseList.length; pReal++) {
-            var itemReal = pauseList[pReal];
-            try {
-              var cleanPAccId = String(itemReal.customer_id).replace(/[^0-9]/g, "");
-              var pAccIter = AdsManagerApp.accounts().withIds([cleanPAccId]).get();
-              if (pAccIter.hasNext()) {
-                AdsManagerApp.select(pAccIter.next());
-                var pCampIter = AdsApp.videoCampaigns().withCondition("CampaignId = " + itemReal.campaign_id).get();
-                if (pCampIter.hasNext()) {
-                  var cToPause = pCampIter.next();
-                  if (cToPause.isEnabled()) {
-                    cToPause.pause();
-                    Logger.log("   [LIVE AUTO-PAUSE] Paused Video Campaign: \\\"" + cToPause.getName() + "\\\" (" + itemReal.reason + ")");
-                  }
+      if (pauseList.length > 0 && !CONFIG.DRY_RUN && !CONFIG.IMPORT_HISTORY) {
+        for (var p = 0; p < pauseList.length; p++) {
+          var item = pauseList[p];
+          var targetId = item.campaign_id;
+          try {
+            if (targetId.indexOf("_") !== -1) {
+              var vIdToPause = targetId.split("_")[1];
+              var adIter = AdsApp.videoAds().get();
+              while (adIter.hasNext()) {
+                var ad = adIter.next();
+                if (ad.getVideoId() === vIdToPause && ad.isEnabled()) {
+                  ad.pause();
+                  Logger.log("   [AUTO-PAUSE] Paused Video Ad for " + vIdToPause);
                 }
               }
-            } catch (errPause) {
-              Logger.log("[ERROR auto-pause for campaign " + itemReal.campaign_id + "] " + errPause);
+            } else {
+              var campIter = AdsApp.videoCampaigns().withIds([targetId]).get();
+              if (campIter.hasNext()) {
+                var c = campIter.next();
+                if (c.isEnabled()) {
+                  c.pause();
+                  Logger.log("   [AUTO-PAUSE] Paused Campaign " + targetId);
+                }
+              }
             }
+          } catch (errPause) {
+            Logger.log("[WARN pause] " + errPause);
           }
         }
       }
-    } catch (errBatchNet) {
-      Logger.log("[ERROR batch network POST] " + errBatchNet);
+    } catch (errNet) {
+      Logger.log("[ERROR /api/sync POST] " + errNet);
     }
   }
 

@@ -168,8 +168,46 @@ export async function POST(req: NextRequest) {
 
     for (const record of records) {
       const campaignId = String(record.campaign_id || "").trim();
-      const rawViews = record.views ?? record.delivered_views ?? record.impressions;
-      const views = Math.max(0, Number(rawViews) || 0);
+      const videoId = (record.video_id || "").trim();
+      const videoUrl = record.video_url || (videoId ? `https://www.youtube.com/watch?v=${videoId}` : null);
+
+      let views = Math.max(0, Number(record.views ?? record.delivered_views ?? record.impressions) || 0);
+
+      // Extract real YouTube Public Views and Video Title directly from YouTube watch page
+      let publicViews: number | null = null;
+      let ytTitle: string | null = null;
+      if (videoId) {
+        try {
+          const ytRes = await fetch(`https://www.youtube.com/watch?v=${videoId}`, {
+            headers: {
+              "User-Agent":
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+              "Accept-Language": "en-US,en;q=0.9",
+            },
+            signal: AbortSignal.timeout(4000),
+          });
+          if (ytRes.ok) {
+            const html = await ytRes.text();
+            const vMatch = html.match(/"viewCount":"(\d+)"/);
+            const tMatch = html.match(/<title>(.*?)<\/title>/);
+            if (vMatch && vMatch[1]) {
+              const pv = parseInt(vMatch[1], 10);
+              if (pv > 0) publicViews = pv;
+            }
+            if (tMatch && tMatch[1]) {
+              ytTitle = tMatch[1].replace(" - YouTube", "").trim();
+            }
+          }
+        } catch (e) {}
+      }
+
+      // STRICT REQUIREMENT: Prioritize real YouTube Public Views over Google Ads TrueViews
+      if (publicViews !== null && publicViews > 0) {
+        views = publicViews;
+      }
+      if (ytTitle && (!record.video_title || record.video_title.startsWith("Video ") || record.video_title.startsWith("Campaign "))) {
+        record.video_title = ytTitle;
+      }
 
       const rawCost = record.cost ?? record.spend_usd ?? (record as any).cost_usd;
       const costUsd = Math.max(0, Number(rawCost) || 0);
@@ -303,27 +341,48 @@ export async function POST(req: NextRequest) {
           .maybeSingle();
 
         const isManual = existingUnlinked?.is_manual_title === true;
-        const videoId = (record.video_id || "").trim();
-        const videoUrl = record.video_url || (videoId ? `https://www.youtube.com/watch?v=${videoId}` : null);
 
         // Preserve manual title if edited by user
         let finalTitle = (record.video_title || record.campaign_name || `Campaign ${campaignId}`).trim();
+        let finalViews = views;
+
         if (isManual && (existingUnlinked?.video_title || existingUnlinked?.campaign_name)) {
           finalTitle = existingUnlinked.video_title || existingUnlinked.campaign_name;
-        } else if (videoId && (!record.video_title || finalTitle.toLowerCase().startsWith("video - "))) {
+        } else if (videoId) {
           try {
-            const oembedRes = await fetch(
-              `https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`,
-              { signal: AbortSignal.timeout(4000) }
-            );
-            if (oembedRes.ok) {
-              const oData = await oembedRes.json();
-              if (oData && oData.title) {
-                finalTitle = oData.title;
+            // Fetch real YouTube public views and title directly from YouTube
+            const ytRes = await fetch(`https://www.youtube.com/watch?v=${videoId}`, {
+              headers: {
+                "User-Agent":
+                  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept-Language": "en-US,en;q=0.9",
+              },
+              signal: AbortSignal.timeout(4000),
+            });
+            if (ytRes.ok) {
+              const html = await ytRes.text();
+              const vMatch = html.match(/"viewCount":"(\d+)"/);
+              const tMatch = html.match(/<title>(.*?)<\/title>/);
+              if (vMatch && vMatch[1]) {
+                const pv = parseInt(vMatch[1], 10);
+                if (pv > 0) finalViews = pv;
+              }
+              if (tMatch && tMatch[1] && (!record.video_title || finalTitle.toLowerCase().startsWith("video - "))) {
+                finalTitle = tMatch[1].replace(" - YouTube", "").trim();
               }
             }
           } catch (oeErr) {
-            // Safe fallback to existing title
+            // Fallback to oembed
+            try {
+              const oembedRes = await fetch(
+                `https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`,
+                { signal: AbortSignal.timeout(3000) }
+              );
+              if (oembedRes.ok) {
+                const oData = await oembedRes.json();
+                if (oData && oData.title) finalTitle = oData.title;
+              }
+            } catch {}
           }
         }
 
@@ -340,7 +399,7 @@ export async function POST(req: NextRequest) {
             video_title: finalTitle,
             video_url: videoUrl,
             cost_usd: isNonUsd ? 0 : costUsd,
-            views: views,
+            views: finalViews,
             status: record.status || "UNKNOWN",
             date_range: (record as any).date_range || "ALL_TIME",
             detected_order_code: detectedCode,
@@ -355,9 +414,6 @@ export async function POST(req: NextRequest) {
       }
 
       // 6. Process Matched Orders
-      const videoId = (record.video_id || "").trim();
-      const videoUrl = record.video_url || (videoId ? `https://www.youtube.com/watch?v=${videoId}` : null);
-
       for (const order of matchedOrders) {
         const size = Math.max(1, order.order_size_views);
         const progress = (views / size) * 100;
