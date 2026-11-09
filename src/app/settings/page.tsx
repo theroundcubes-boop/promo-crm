@@ -206,43 +206,14 @@ export default function SettingsPage() {
 var CONFIG = {
   SYNC_ENDPOINT_URL: "${syncEndpointUrl}",
   SECRET_KEY: "${activeScriptKey}",
-  DRY_RUN: true,
+  DRY_RUN: false,
   IMPORT_HISTORY: false,
   MAX_ACCOUNTS_PER_RUN: 50,
-  TARGET_ACCOUNT_IDS: [], // e.g. ["135-858-3337"] or leave [] for all
+  TARGET_ACCOUNT_IDS: [], // Khali [] chhod dein: Sub-account me automatic current account pakdega; MCC me sabhi accounts loop karega!
   DEBUG: true
 };
 
 var OEMBED_CACHE = {};
-
-function getYouTubeDetails(videoId) {
-  var result = { title: null, views: 0 };
-  if (!videoId) return result;
-  try {
-    var url = "https://www.youtube.com/watch?v=" + videoId;
-    var res = UrlFetchApp.fetch(url, {
-      muteHttpExceptions: true,
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept-Language": "en-US,en;q=0.9"
-      }
-    });
-    if (res.getResponseCode() === 200) {
-      var html = res.getContentText();
-      var vMatch = html.match(/"viewCount":"(\d+)"/);
-      var tMatch = html.match(/<title>(.*?)<\/title>/);
-      if (vMatch && vMatch[1]) {
-        result.views = parseInt(vMatch[1], 10);
-      }
-      if (tMatch && tMatch[1]) {
-        result.title = tMatch[1].replace(" - YouTube", "").trim();
-      }
-    }
-  } catch (errYt) {
-    Logger.log("[WARN fetch YouTube " + videoId + "] " + errYt);
-  }
-  return result;
-}
 
 function getOembedTitle(videoId) {
   if (!videoId) return null;
@@ -272,116 +243,44 @@ function processAccount(accountsPayload) {
   Logger.log("-------------------------------------------------");
   Logger.log("[ACCOUNT] " + accountName + " (ID: " + customerId + ", Currency: " + currencyCode + ")");
 
-  // 1. Map Video Ads to collect spend, views, and campaign info per video ID
-  var videoStatsMap = {};
+  // Query the native 'video' resource that directly powers Google Ads 'Assets -> Videos'
+  var videoQuery = "SELECT video.id, video.title, metrics.impressions, metrics.cost_micros FROM video";
   try {
-    if (typeof AdsApp.videoAds === "function") {
-      var vAdIter = AdsApp.videoAds().get();
-      while (vAdIter.hasNext()) {
-        var vAd = vAdIter.next();
-        var vId = vAd.getVideoId();
-        if (!vId) continue;
+    var report = AdsApp.search(videoQuery);
+    var count = 0;
+    while (report.hasNext()) {
+      var r = report.next();
+      var vId = r.video.id;
+      if (!vId) continue;
 
-        var stats = vAd.getStatsFor("ALL_TIME");
-        var cost = stats ? (stats.getCost() || 0) : 0;
-        var views = stats ? (stats.getViews() || 0) : 0;
-        var imps = stats ? (stats.getImpressions() || 0) : 0;
-        var isEnabled = vAd.isEnabled();
+      count++;
+      var title = r.video.title || ("YouTube Video " + vId);
+      var imps = (r.metrics && r.metrics.impressions) ? r.metrics.impressions : 0;
+      var costMicros = (r.metrics && r.metrics.costMicros) ? r.metrics.costMicros : 0;
+      var costUsd = Math.round((costMicros / 1e6) * 100) / 100;
+      var compositeId = "vid_" + vId;
+      var videoUrl = "https://www.youtube.com/watch?v=" + vId;
 
-        var campId = "";
-        var campName = "";
-        try {
-          var camp = vAd.getAdGroup().getCampaign();
-          campId = camp.getId().toString();
-          campName = camp.getName();
-        } catch (eCamp) {}
+      accountsPayload.push({
+        customer_id: customerId,
+        account_name: accountName,
+        currency: currencyCode,
+        campaign_id: compositeId,
+        campaign_name: title,
+        video_id: vId,
+        video_title: title,
+        video_url: videoUrl,
+        status: "ENABLED",
+        cost: costUsd,
+        views: imps, // Exact delivered views from AdWords Assets table!
+        impressions: imps
+      });
 
-        if (!videoStatsMap[vId]) {
-          videoStatsMap[vId] = {
-            cost: cost,
-            views: views,
-            impressions: imps,
-            status: isEnabled ? "ENABLED" : "PAUSED",
-            campaignId: campId,
-            campaignName: campName
-          };
-        } else {
-          videoStatsMap[vId].cost += cost;
-          videoStatsMap[vId].views += views;
-          videoStatsMap[vId].impressions += imps;
-          if (isEnabled) videoStatsMap[vId].status = "ENABLED";
-          if (!videoStatsMap[vId].campaignId && campId) {
-            videoStatsMap[vId].campaignId = campId;
-            videoStatsMap[vId].campaignName = campName;
-          }
-        }
-      }
+      Logger.log("   [" + count + "] Video: " + vId + " | AdWords Delivered: " + imps.toLocaleString() + " | Cost: $" + costUsd + " | Title: " + title);
     }
-  } catch (errAdMap) {
-    Logger.log("[WARN videoAds scan] " + errAdMap);
-  }
-
-  // 2. Query all YouTube Video Assets in the account (Assets -> Videos)
-  var assetMap = {};
-  try {
-    var assetQuery = "SELECT asset.id, asset.resource_name, asset.name, asset.youtube_video_asset.youtube_video_id, asset.youtube_video_asset.youtube_video_title FROM asset WHERE asset.type = 'YOUTUBE_VIDEO'";
-    var assetReport = AdsApp.search(assetQuery);
-    while (assetReport.hasNext()) {
-      var aRow = assetReport.next();
-      if (aRow.asset && aRow.asset.youtubeVideoAsset && aRow.asset.youtubeVideoAsset.youtubeVideoId) {
-        var yId = aRow.asset.youtubeVideoAsset.youtubeVideoId;
-        var yTitle = aRow.asset.youtubeVideoAsset.youtubeVideoTitle || aRow.asset.name || null;
-        assetMap[yId] = {
-          title: yTitle,
-          resourceName: aRow.asset.resourceName
-        };
-      }
-    }
-  } catch (errAsset) {
-    Logger.log("[WARN asset query] " + errAsset);
-  }
-
-  // 3. Combine all distinct YouTube Video IDs
-  var allVideoIds = {};
-  for (var aId in assetMap) allVideoIds[aId] = true;
-  for (var sId in videoStatsMap) allVideoIds[sId] = true;
-
-  var videoList = Object.keys(allVideoIds);
-  Logger.log("   [DISCOVERED VIDEO ASSETS] " + videoList.length + " video(s) found in account " + customerId);
-
-  for (var i = 0; i < videoList.length; i++) {
-    var vId = videoList[i];
-    var assetInfo = assetMap[vId] || {};
-    var statsInfo = videoStatsMap[vId] || {};
-
-    // Fetch live YouTube public views and exact title directly from YouTube
-    var ytInfo = getYouTubeDetails(vId);
-    var title = ytInfo.title || assetInfo.title || getOembedTitle(vId);
-    var publicViews = ytInfo.views > 0 ? ytInfo.views : (statsInfo.views || 0);
-
-    var parentCampId = statsInfo.campaignId || "";
-    var compositeId = parentCampId ? (parentCampId + "_" + vId) : ("vid_" + vId);
-    var costUsd = Math.round((statsInfo.cost || 0) * 100) / 100;
-    var impressions = statsInfo.impressions || 0;
-    var status = statsInfo.status || "ENABLED";
-    var videoUrl = "https://www.youtube.com/watch?v=" + vId;
-
-    accountsPayload.push({
-      customer_id: customerId,
-      account_name: accountName,
-      currency: currencyCode,
-      campaign_id: compositeId,
-      campaign_name: title || statsInfo.campaignName || ("Video " + vId),
-      video_id: vId,
-      video_title: title || ("YouTube Video " + vId),
-      video_url: videoUrl,
-      status: status,
-      cost: costUsd,
-      views: publicViews, // REAL YouTube Public Views!
-      impressions: impressions
-    });
-
-    Logger.log("   [" + (i + 1) + "/" + videoList.length + "] Video: " + vId + " | Title: " + (title || "[Server will scrape]") + " | Public Views: " + publicViews.toLocaleString() + " | Cost: $" + costUsd + " | Status: " + status);
+    Logger.log("   [DISCOVERED VIDEOS] " + count + " video(s) processed from Assets -> Videos.");
+  } catch (errVideo) {
+    Logger.log("[ERROR querying video resource] " + errVideo);
   }
 }
 

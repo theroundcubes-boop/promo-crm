@@ -171,12 +171,12 @@ export async function POST(req: NextRequest) {
       const videoId = (record.video_id || "").trim();
       const videoUrl = record.video_url || (videoId ? `https://www.youtube.com/watch?v=${videoId}` : null);
 
+      // Google Ads Delivered Views is the source of truth for the campaign
       let views = Math.max(0, Number(record.views ?? record.delivered_views ?? record.impressions) || 0);
 
-      // Extract real YouTube Public Views and Video Title directly from YouTube watch page
-      let publicViews: number | null = null;
+      // Extract Video Title and thumbnail info directly if missing
       let ytTitle: string | null = null;
-      if (videoId) {
+      if (videoId && (!record.video_title || record.video_title.startsWith("Video ") || record.video_title.startsWith("Campaign "))) {
         try {
           const ytRes = await fetch(`https://www.youtube.com/watch?v=${videoId}`, {
             headers: {
@@ -188,12 +188,7 @@ export async function POST(req: NextRequest) {
           });
           if (ytRes.ok) {
             const html = await ytRes.text();
-            const vMatch = html.match(/"viewCount":"(\d+)"/);
             const tMatch = html.match(/<title>(.*?)<\/title>/);
-            if (vMatch && vMatch[1]) {
-              const pv = parseInt(vMatch[1], 10);
-              if (pv > 0) publicViews = pv;
-            }
             if (tMatch && tMatch[1]) {
               ytTitle = tMatch[1].replace(" - YouTube", "").trim();
             }
@@ -201,11 +196,7 @@ export async function POST(req: NextRequest) {
         } catch (e) {}
       }
 
-      // STRICT REQUIREMENT: Prioritize real YouTube Public Views over Google Ads TrueViews
-      if (publicViews !== null && publicViews > 0) {
-        views = publicViews;
-      }
-      if (ytTitle && (!record.video_title || record.video_title.startsWith("Video ") || record.video_title.startsWith("Campaign "))) {
+      if (ytTitle) {
         record.video_title = ytTitle;
       }
 
