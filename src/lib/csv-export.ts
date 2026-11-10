@@ -16,7 +16,7 @@ export function exportOrdersCsv(
   orders: Order[],
   accounts: Account[],
   clients: Client[],
-  usdToInr: number = 88
+  usdToInr: number = 100
 ) {
   const headers = [
     "Order ID",
@@ -70,7 +70,7 @@ export function exportOrdersCsv(
 export function exportAccountsCsv(
   accounts: Account[],
   orders: Order[],
-  usdToInr: number = 88
+  usdToInr: number = 100
 ) {
   const headers = [
     "Account ID",

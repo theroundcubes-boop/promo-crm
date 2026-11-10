@@ -12,7 +12,7 @@ export type NotificationChannel = "email" | "telegram" | "both";
 export interface Settings {
   id?: string;
   user_id: string;
-  usd_to_inr: number; // default 88
+  usd_to_inr: number; // default 100
   alert_threshold_percent: number; // default 85
   auto_pause: boolean; // default true
   notification_channel: NotificationChannel; // default "email"

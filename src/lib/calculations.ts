@@ -127,7 +127,7 @@ export function calculateRealizedLeverage(
 export function calculateAccountMetrics(
   account: Account,
   orders: Order[],
-  usdToInr: number = 88,
+  usdToInr: number = 100,
   alertThresholdPercent: number = 85
 ): AccountMetrics {
   const accountOrders = orders.filter((o) => o.account_id === account.id);
@@ -208,7 +208,7 @@ export function calculateAccountMetrics(
 export function calculateDashboardMetrics(
   accounts: Account[],
   orders: Order[],
-  usdToInr: number = 88,
+  usdToInr: number = 100,
   alertThresholdPercent: number = 85
 ): DashboardMetrics {
   let totalGrossProfitInr = 0;

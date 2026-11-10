@@ -31,7 +31,7 @@ export const EMPTY_REAL_USER_STATE: AppState = {
   currentUserEmail: undefined,
   settings: {
     user_id: "",
-    usd_to_inr: 88.0,
+    usd_to_inr: 100.0,
     alert_threshold_percent: 85.0,
     auto_pause: false, // auto_pause OFF by default (Requirement 6)
     notification_channel: "email",
@@ -53,7 +53,7 @@ export const INITIAL_DEMO_DATA: AppState = {
   currentUserEmail: "demo@promocrm.agency",
   settings: {
     user_id: "demo_user_1",
-    usd_to_inr: 88.0,
+    usd_to_inr: 100.0,
     alert_threshold_percent: 85.0,
     auto_pause: true,
     notification_channel: "both",

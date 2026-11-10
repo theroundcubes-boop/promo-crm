@@ -31,6 +31,19 @@ class MockStore {
     this.state = this.loadState();
     if (typeof window !== "undefined") {
       this.initSupabaseSync();
+
+      // Instantly refetch when user switches tabs or window regains focus
+      window.addEventListener("focus", () => this.refreshData());
+      document.addEventListener("visibilitychange", () => {
+        if (document.visibilityState === "visible") this.refreshData();
+      });
+
+      // Background live polling every 10 seconds so data stays fresh without page reloads
+      setInterval(() => {
+        if (typeof document !== "undefined" && document.visibilityState === "visible") {
+          this.refreshData();
+        }
+      }, 10000);
     }
   }
 
@@ -136,7 +149,7 @@ class MockStore {
       if (!settings) {
         const defaultSettings = {
           user_id: userId,
-          usd_to_inr: 88.0,
+          usd_to_inr: 100.0,
           alert_threshold_percent: 85.0,
           auto_pause: false,
           notification_channel: "email",
@@ -200,7 +213,7 @@ class MockStore {
           { event: "*", schema: "public", filter: `user_id=eq.${userId}` },
           () => {
             // Re-fetch when Google Ads script or another phone updates data
-            this.refetchSupabaseData(userId);
+            this.refreshData();
           }
         )
         .subscribe();
@@ -211,18 +224,46 @@ class MockStore {
     }
   }
 
-  private async refetchSupabaseData(userId: string) {
+  /**
+   * Refetches all latest records from Supabase and notifies subscribers
+   */
+  async refreshData(): Promise<void> {
+    if (typeof window === "undefined") return;
+    if (!this.supabaseClient) {
+      this.supabaseClient = createClient();
+    }
     if (!this.supabaseClient) return;
+
     try {
+      let userId = this.state.settings?.user_id;
+      if (!userId) {
+        const {
+          data: { session },
+        } = await this.supabaseClient.auth.getSession();
+        if (session?.user?.id) {
+          userId = session.user.id;
+          if (this.state.settings) {
+            this.state.settings.user_id = userId;
+          }
+          this.state.currentUserEmail = session.user.email;
+          this.state.isDemoUser = false;
+        }
+      }
+      if (!userId) return;
+
       const [
+        { data: settings },
         { data: accs },
         { data: ords },
+        { data: cls },
         { data: notifs },
         { data: unlinked },
         { data: syncLogs },
       ] = await Promise.all([
+        this.supabaseClient.from("settings").select("*").eq("user_id", userId).maybeSingle(),
         this.supabaseClient.from("accounts").select("*").eq("user_id", userId),
-        this.supabaseClient.from("orders").select("*").eq("user_id", userId),
+        this.supabaseClient.from("orders").select("*").eq("user_id", userId).order("created_at", { ascending: false }),
+        this.supabaseClient.from("clients").select("*").eq("user_id", userId),
         this.supabaseClient
           .from("notifications")
           .select("*")
@@ -237,17 +278,27 @@ class MockStore {
           .from("sync_logs")
           .select("*")
           .eq("user_id", userId)
-          .order("timestamp", { ascending: false })
+          .order("created_at", { ascending: false })
           .limit(20),
       ]);
-      if (accs) this.state.accounts = accs;
-      if (ords) this.state.orders = ords;
-      if (notifs) this.state.notifications = notifs;
-      if (unlinked) this.state.unlinkedCampaigns = unlinked;
-      if (syncLogs) this.state.syncLogs = syncLogs;
-      this.saveState();
-    } catch {
-      // ignore
+
+      let changed = false;
+      if (settings && JSON.stringify(settings) !== JSON.stringify(this.state.settings)) {
+        this.state.settings = settings;
+        changed = true;
+      }
+      if (accs) { this.state.accounts = accs; changed = true; }
+      if (ords) { this.state.orders = ords; changed = true; }
+      if (cls) { this.state.clients = cls; changed = true; }
+      if (notifs) { this.state.notifications = notifs; changed = true; }
+      if (unlinked) { this.state.unlinkedCampaigns = unlinked; changed = true; }
+      if (syncLogs) { this.state.syncLogs = syncLogs; changed = true; }
+
+      if (changed) {
+        this.saveState();
+      }
+    } catch (err) {
+      console.warn("mockStore.refreshData error:", err);
     }
   }
 

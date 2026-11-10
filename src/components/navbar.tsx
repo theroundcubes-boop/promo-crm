@@ -28,7 +28,7 @@ export function Navbar({ onStartTour }: NavbarProps) {
   const { theme, toggleTheme } = useTheme();
   const pathname = usePathname();
   const [unreadCount, setUnreadCount] = useState(0);
-  const [usdRate, setUsdRate] = useState(88);
+  const [usdRate, setUsdRate] = useState(100);
   const [showExportMenu, setShowExportMenu] = useState(false);
   const [isDemoUser, setIsDemoUser] = useState(true);
   const [currentUserEmail, setCurrentUserEmail] = useState<string | undefined>();

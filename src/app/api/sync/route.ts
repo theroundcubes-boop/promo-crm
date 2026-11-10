@@ -289,9 +289,13 @@ export async function POST(req: NextRequest) {
         }
       }
 
-      // If still not matched, check global campaign_id match under this user
+      // If still not matched, check campaign_id match ONLY if the order is unassigned
       if (matchedOrders.length === 0) {
-        matchedOrders = ordersList.filter((o) => o.campaign_id === campaignId);
+        matchedOrders = ordersList.filter(
+          (o) =>
+            (!o.account_id || o.account_id === "" || o.account_id === "temp") &&
+            o.campaign_id === campaignId
+        );
       }
 
       // If unmatched, save to unlinked_campaigns (Requirement B.2)
@@ -484,19 +488,25 @@ export async function POST(req: NextRequest) {
         }
 
         // Prepare update payload:
-        // Do NOT overwrite spend_usd if account is in non-USD currency!
+        // Monotonic guard: Only update views/spend if incoming is greater, or if order currently has 0
+        const currentDelivered = Number(order.delivered_views) || 0;
+        const currentCost = Number(order.spend_usd) || 0;
+        const effectiveViews = views > 0 ? Math.max(views, currentDelivered) : currentDelivered;
+        const effectiveCost = costUsd > 0 ? Math.max(costUsd, currentCost) : currentCost;
+
         const updateData: Record<string, any> = {
-          delivered_views: views,
+          delivered_views: effectiveViews,
           status: newStatus,
           campaign_id: campaignId,
           updated_at: new Date().toISOString(),
         };
 
         if (!isNonUsd) {
-          updateData.spend_usd = costUsd;
+          updateData.spend_usd = effectiveCost;
         }
 
-        if (matchedAccountId && order.account_id !== matchedAccountId) {
+        // Only assign account_id if order was unassigned
+        if (matchedAccountId && (!order.account_id || order.account_id === "temp")) {
           updateData.account_id = matchedAccountId;
         }
 

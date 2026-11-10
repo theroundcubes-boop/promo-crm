@@ -46,6 +46,7 @@ export default function DashboardPage() {
   >({});
 
   useEffect(() => {
+    mockStore.refreshData();
     const unsub = mockStore.subscribe(() => {
       setState({ ...mockStore.getState() });
     });

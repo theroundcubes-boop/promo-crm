@@ -36,6 +36,7 @@ export default function AccountsPage() {
   const [newNotes, setNewNotes] = useState("");
 
   useEffect(() => {
+    mockStore.refreshData();
     const unsub = mockStore.subscribe(() => {
       setState({ ...mockStore.getState() });
     });

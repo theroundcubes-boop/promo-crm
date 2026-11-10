@@ -1,6 +1,6 @@
 "use client";
 
-import React, { Suspense, useEffect, useState } from "react";
+import React, { Suspense, useEffect, useState, useMemo } from "react";
 import { useSearchParams } from "next/navigation";
 import {
   Video,
@@ -17,10 +17,18 @@ import {
   CheckCircle2,
   Trash2,
   MessageCircle,
+  BarChart3,
 } from "lucide-react";
 import { mockStore, AppState } from "@/lib/storage/mock-store";
 import { calculateOrderMetrics } from "@/lib/calculations";
 import { Order, OrderStatus } from "@/lib/types";
+
+const getOrderYoutubeId = (order: Order) => {
+  if (order.video_id && order.video_id !== "null" && order.video_id.length > 5) return order.video_id;
+  if (!order.video_link) return null;
+  const match = order.video_link.match(/(?:youtu\.be\/|youtube\.com\/(?:embed\/|v\/|watch\?v=|watch\?.+&v=))([\w-]{11})/);
+  return match ? match[1] : null;
+};
 
 function OrdersContent() {
   const searchParams = useSearchParams();
@@ -57,6 +65,7 @@ function OrdersContent() {
   const [formStatus, setFormStatus] = useState<OrderStatus>("running");
 
   useEffect(() => {
+    mockStore.refreshData();
     const unsub = mockStore.subscribe(() => {
       setState({ ...mockStore.getState() });
     });
@@ -196,6 +205,35 @@ function OrdersContent() {
     return matchesSearch && matchesClient && matchesAccount && matchesStatus;
   });
 
+  // Aggregated totals for the current filtered view
+  const filterTotals = useMemo(() => {
+    let totalOrdered = 0;
+    let totalDelivered = 0;
+    let totalSpendUsd = 0;
+    let totalRevenueInr = 0;
+
+    filteredOrders.forEach((o) => {
+      totalOrdered += o.order_size_views || 0;
+      totalDelivered += o.delivered_views || 0;
+      totalSpendUsd += o.spend_usd || 0;
+      const rate = o.client_rate_paise_per_view || 0;
+      totalRevenueInr += ((o.delivered_views || 0) * rate) / 100;
+    });
+
+    const progressPercent = totalOrdered > 0 ? Math.round((totalDelivered / totalOrdered) * 100) : 0;
+    const isFiltered = Boolean(search.trim()) || clientFilter !== "all" || accountFilter !== "all" || statusFilter !== "all";
+
+    return {
+      count: filteredOrders.length,
+      totalOrdered,
+      totalDelivered,
+      totalSpendUsd,
+      totalRevenueInr,
+      progressPercent,
+      isFiltered,
+    };
+  }, [filteredOrders, search, clientFilter, accountFilter, statusFilter]);
+
   return (
     <div className="space-y-6 animate-fade-in">
       {/* Header */}
@@ -274,6 +312,127 @@ function OrdersContent() {
         </div>
       </div>
 
+      {/* Aggregated Total Count & Metrics Banner */}
+      {filteredOrders.length > 0 && (
+        <div className={`p-4 rounded-2xl border transition-all ${
+          filterTotals.isFiltered
+            ? "bg-gradient-to-r from-indigo-50/90 via-blue-50/80 to-purple-50/70 dark:from-slate-800 dark:via-slate-850 dark:to-slate-800 border-indigo-200 dark:border-indigo-800/60 shadow-sm ring-1 ring-indigo-500/10"
+            : "bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 shadow-xs"
+        }`}>
+          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-indigo-600 text-white flex items-center justify-center shrink-0 shadow-md shadow-indigo-500/25">
+                <BarChart3 className="w-5 h-5" />
+              </div>
+              <div className="min-w-0">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-xs font-bold uppercase tracking-wider text-indigo-700 dark:text-indigo-400">
+                    {filterTotals.isFiltered ? "Filtered Summary" : "All Orders Overview"}
+                  </span>
+                  <span className="px-2 py-0.5 rounded-full text-[11px] font-extrabold bg-indigo-600 text-white shadow-xs">
+                    {filterTotals.count} {filterTotals.count === 1 ? "Order" : "Orders"}
+                  </span>
+                  {filterTotals.isFiltered && (
+                    <button
+                      onClick={() => {
+                        setSearch("");
+                        setClientFilter("all");
+                        setAccountFilter("all");
+                        setStatusFilter("all");
+                      }}
+                      className="text-[11px] text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400 underline ml-1 cursor-pointer"
+                    >
+                      Clear filter
+                    </button>
+                  )}
+                </div>
+                <p className="text-xs text-slate-600 dark:text-slate-300 font-medium truncate max-w-lg mt-0.5">
+                  {search.trim() ? (
+                    <>Total results matching: <span className="font-bold text-slate-900 dark:text-white">"{search.trim()}"</span></>
+                  ) : filterTotals.isFiltered ? (
+                    "Combined totals for active filter selection"
+                  ) : (
+                    "Cumulative metrics across all active accounts"
+                  )}
+                </p>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 sm:gap-5 divide-x-0 sm:divide-x divide-slate-200 dark:divide-slate-700/60 pt-2 lg:pt-0 border-t lg:border-t-0 border-slate-200 dark:border-slate-700/60">
+              {/* Total Delivered Views */}
+              <div className="sm:px-3 first:pl-0">
+                <span className="text-[10px] font-bold text-slate-500 dark:text-slate-400 uppercase block tracking-wider">
+                  Total Delivered Views
+                </span>
+                <div className="flex items-baseline gap-1 mt-0.5">
+                  <span className="text-lg sm:text-xl font-black text-indigo-600 dark:text-indigo-400 font-mono">
+                    {filterTotals.totalDelivered.toLocaleString()}
+                  </span>
+                  <span className="text-[11px] text-slate-400 font-medium">
+                    / {filterTotals.totalOrdered.toLocaleString()}
+                  </span>
+                </div>
+                <div className="flex items-center gap-1 mt-0.5">
+                  <div className="w-16 h-1.5 rounded-full bg-slate-200 dark:bg-slate-700 overflow-hidden">
+                    <div
+                      className="h-full bg-indigo-600 rounded-full"
+                      style={{ width: `${Math.min(100, filterTotals.progressPercent)}%` }}
+                    />
+                  </div>
+                  <span className="text-[10px] font-bold text-indigo-600 dark:text-indigo-400">
+                    {filterTotals.progressPercent}%
+                  </span>
+                </div>
+              </div>
+
+              {/* Total Ad Spend */}
+              <div className="sm:px-3">
+                <span className="text-[10px] font-bold text-slate-500 dark:text-slate-400 uppercase block tracking-wider">
+                  Total Ad Spend
+                </span>
+                <div className="mt-0.5 text-lg sm:text-xl font-black text-slate-900 dark:text-white font-mono">
+                  ${filterTotals.totalSpendUsd.toFixed(2)}
+                </div>
+                <span className="text-[10px] text-slate-400 font-medium">USD (~₹{Math.round(filterTotals.totalSpendUsd * (settings.usd_to_inr || 100)).toLocaleString("en-IN")})</span>
+              </div>
+
+              {/* Total Revenue */}
+              <div className="sm:px-3">
+                <span className="text-[10px] font-bold text-slate-500 dark:text-slate-400 uppercase block tracking-wider">
+                  Total Revenue
+                </span>
+                <div className="mt-0.5 text-lg sm:text-xl font-black text-emerald-600 dark:text-emerald-400 font-mono">
+                  ₹{Math.round(filterTotals.totalRevenueInr).toLocaleString("en-IN")}
+                </div>
+                <span className="text-[10px] text-slate-400 font-medium">Billed to Client</span>
+              </div>
+
+              {/* Net Profit / Margin */}
+              <div className="sm:px-3">
+                <span className="text-[10px] font-bold text-slate-500 dark:text-slate-400 uppercase block tracking-wider">
+                  Est. Net Profit
+                </span>
+                {(() => {
+                  const costInr = filterTotals.totalSpendUsd * (settings.usd_to_inr || 100);
+                  const marginInr = filterTotals.totalRevenueInr - costInr;
+                  const isPositive = marginInr >= 0;
+                  return (
+                    <div>
+                      <div className={`mt-0.5 text-lg sm:text-xl font-black font-mono ${isPositive ? "text-emerald-600 dark:text-emerald-400" : "text-red-600 dark:text-red-400"}`}>
+                        {isPositive ? "+" : ""}₹{Math.round(marginInr).toLocaleString("en-IN")}
+                      </div>
+                      <span className="text-[10px] text-slate-400 font-medium">
+                        Margin: {filterTotals.totalRevenueInr > 0 ? `${Math.round((marginInr / filterTotals.totalRevenueInr) * 100)}%` : "0%"}
+                      </span>
+                    </div>
+                  );
+                })()}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Orders List / Cards */}
       <div className="space-y-3">
         {filteredOrders.map((order) => {
@@ -290,6 +449,9 @@ function OrdersContent() {
           const isEditingSpend =
             inlineEdit?.orderId === order.id && inlineEdit.field === "spend";
 
+          const vId = getOrderYoutubeId(order);
+          const thumbUrl = vId ? `https://img.youtube.com/vi/${vId}/mqdefault.jpg` : null;
+
           return (
             <div
               key={order.id}
@@ -302,11 +464,34 @@ function OrdersContent() {
               }`}
             >
               <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-                <div className="space-y-2 flex-1 min-w-0">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <h2 className="font-bold text-sm text-slate-900 dark:text-white truncate">
-                      {order.video_title}
-                    </h2>
+                <div className="flex items-start gap-3.5 flex-1 min-w-0">
+                  {/* YouTube Video Thumbnail */}
+                  <div className="relative w-28 h-16 sm:w-32 sm:h-20 rounded-xl overflow-hidden bg-slate-950 border border-slate-200 dark:border-slate-800 shrink-0">
+                    {thumbUrl ? (
+                      <img
+                        src={thumbUrl}
+                        alt={order.video_title}
+                        className="w-full h-full object-cover"
+                        loading="lazy"
+                      />
+                    ) : (
+                      <div className="w-full h-full flex flex-col items-center justify-center p-2 text-center text-slate-400">
+                        <Video className="w-5 h-5 mb-1 opacity-50" />
+                        <span className="text-[10px] font-semibold">No Video</span>
+                      </div>
+                    )}
+                    {vId && (
+                      <span className="absolute bottom-1 right-1 px-1 py-0.2 rounded bg-black/80 text-[9px] font-mono font-bold text-white">
+                        HD
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="space-y-2 flex-1 min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <h2 className="font-bold text-sm text-slate-900 dark:text-white truncate">
+                        {order.video_title}
+                      </h2>
 
                     {order.video_link && (
                       <a
@@ -394,6 +579,7 @@ function OrdersContent() {
                     </div>
                   </div>
                 </div>
+              </div>
 
                 <div className="flex flex-wrap sm:flex-nowrap items-center gap-4 lg:gap-6 pt-2 lg:pt-0 border-t lg:border-t-0 border-slate-100 dark:border-slate-800/80">
                   <div className="text-left sm:text-right">

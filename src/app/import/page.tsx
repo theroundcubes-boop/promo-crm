@@ -114,6 +114,7 @@ export default function ImportInboxPage() {
       } catch (e) {}
     }
 
+    mockStore.refreshData();
     return mockStore.subscribe(() => {
       setState({ ...mockStore.getState() });
     });
